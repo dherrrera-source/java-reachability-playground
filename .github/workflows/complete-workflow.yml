@@ -13,7 +13,7 @@ permissions:
 jobs:
   # ============================
   # JOB 0: SECRET SCANNING (NO BLOQUEANTE, 1 SOLO ARTEFACTO)
-  # - detect-secrets (baseline)
+  # - detect-secrets (JSON)
   # - gitleaks (filesystem scan)
   # - trufflehog (filesystem scan)
   # - empaqueta todo en secrets-report.tgz
@@ -54,7 +54,7 @@ jobs:
           docker run --rm -v "$PWD:/repo" -w /repo trufflesecurity/trufflehog:latest \
             filesystem /repo --json > secret-reports/trufflehog.json
 
-      # 4) Consolidar resultados (summary.json) - sin python -c multilínea
+      # 4) Consolidar resultados (summary.json)
       - name: Build consolidated summary
         continue-on-error: true
         run: |
@@ -71,7 +71,7 @@ jobs:
               return default
 
           # detect-secrets: cuenta findings desde results{}
-          ds = safe_load_json(p / "detect-secrets.baseline", {})
+          ds = safe_load_json(p / "detect-secrets.json", {})
           results = ds.get("results", {})
           ds_count = sum(len(v) for v in results.values()) if isinstance(results, dict) else -1
 
@@ -92,7 +92,7 @@ jobs:
             "trufflehog_findings": th_count,
             "mode": "non-blocking",
             "files": {
-              "detect_secrets_baseline": "secret-reports/detect-secrets.baseline",
+              "detect_secrets_report": "secret-reports/detect-secrets.json",
               "gitleaks_report": "secret-reports/gitleaks.json",
               "trufflehog_report": "secret-reports/trufflehog.json"
             }
@@ -183,11 +183,69 @@ jobs:
           if-no-files-found: ignore
 
   # ============================
+  # JOB 2.5: IMAGE SCAN (TRIVY)
+  # ============================
+  image_scan_trivy:
+    name: Image Scan (Trivy) - Container vulnerabilities
+    needs: sca_snyk
+    runs-on: ubuntu-latest
+
+    steps:
+      # Define la imagen a escanear (ajusta a tu imagen real)
+      - name: Define image reference
+        run: |
+          echo "IMAGE_REF=ghcr.io/dherrrera-source/java-reachability-playground:latest" >> $GITHUB_ENV
+
+      # Login al registry si es privado (ejemplo GHCR)
+      # Si la imagen es pública, puedes eliminar este paso.
+      - name: Login to GHCR (if private)
+        continue-on-error: true
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
+            -u ${{ github.actor }} --password-stdin
+
+      - name: Pull image
+        run: docker pull "$IMAGE_REF"
+
+      # Instala Trivy desde repo oficial (Ubuntu)
+      - name: Install Trivy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget
+          wget -qO- https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb stable main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+
+      # Scan no bloqueante (modo visibilidad)
+      - name: Trivy scan image (non-blocking)
+        continue-on-error: true
+        run: |
+          mkdir -p trivy-reports
+          trivy image --format json --output trivy-reports/trivy-image.json "$IMAGE_REF"
+          trivy image --format table --output trivy-reports/trivy-image.txt "$IMAGE_REF"
+
+      # Artifact con evidencia
+      - name: Package Trivy report
+        if: always()
+        run: |
+          tar -czf trivy-image-report.tgz -C trivy-reports .
+          ls -lah trivy-image-report.tgz
+
+      - name: Upload Trivy artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-report
+          path: trivy-image-report.tgz
+          if-no-files-found: ignore
+
+  # ============================
   # JOB 3: DAST (APLICACIÓN)
   # ============================
   dast_zap:
     name: DAST (OWASP ZAP Baseline)
-    needs: sca_snyk
+    needs: image_scan_trivy
     runs-on: ubuntu-latest
 
     steps:
