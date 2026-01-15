@@ -37,7 +37,7 @@ jobs:
         run: |
           mkdir -p secret-reports
           # Excluye .git para evitar falsos positivos como FETCH_HEAD
-          detect-secrets scan --all-files --exclude-files '\.git/.*' > secret-reports/detect-secrets.baseline
+          detect-secrets scan --all-files --exclude-files '\.git/.*' > secret-reports/detect-secrets.json
 
       # 2) Gitleaks (filesystem)
       - name: Run Gitleaks (non-blocking)
