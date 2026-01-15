@@ -15,7 +15,7 @@ jobs:
   # JOB 0: SECRET SCANNING (NO BLOQUEANTE, 1 SOLO ARTEFACTO)
   # ============================
   secrets_scan:
-    name: Secrets Detection (detect-secrets + gitleaks + trufflehog) 
+    name: Secrets Search (detect-secrets + gitleaks + trufflehog) 
     runs-on: ubuntu-latest
 
     steps:
