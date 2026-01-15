@@ -1,5 +1,5 @@
 # Nombre del workflow que aparecerá en GitHub Actions
-name: Build, Test & Security Scans (SAST/SCA/DAST)
+name: Build, Test & Security Scans (SAST/SCA/IMAGESCAN/DAST)
 
 # Evento que dispara el workflow
 on:
