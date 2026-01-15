@@ -1,5 +1,5 @@
 # Nombre del workflow que aparecerá en GitHub Actions
-name: Security Scans (SAST/SCA/IMAGESCAN/DAST)
+name: Security Scans (SAST/SCA/IAC/IMAGESCAN/DAST)
 
 # Evento que dispara el workflow
 on:
@@ -15,7 +15,7 @@ jobs:
   # JOB 0: SECRET SCANNING (NO BLOQUEANTE, 1 SOLO ARTEFACTO)
   # ============================
   secrets_scan:
-    name: Secrets Search (detect-secrets + gitleaks + trufflehog) 
+    name: Secrets Search (detect-secrets + gitleaks + trufflehog)
     runs-on: ubuntu-latest
 
     steps:
@@ -169,14 +169,63 @@ jobs:
           if-no-files-found: ignore
 
   # ============================
-  # JOB 2.5: IMAGE SCAN (TRIVY) - SIN APT REPO (USANDO ACTION OFICIAL)
+  # JOB 2.25: IAC SCAN (TRIVY CONFIG) - STAGE SEPARADO
+  # - No bloqueante
+  # - Guarda artifact con JSON (y error si aplica)
   # ============================
-  image_scan_trivy:
-    name: Image Scan (Trivy) 
+  trivy_iac:
+    name: IaC Scan (Trivy Config)
     needs: sca_snyk
     runs-on: ubuntu-latest
 
-    # Para leer imágenes privadas en GHCR necesitas packages:read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare report folder
+        run: mkdir -p trivy-iac-reports
+
+      - name: Trivy config scan (repo)
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.31.0
+        with:
+          scan-type: "config"
+          scan-ref: "."
+          format: "json"
+          output: "trivy-iac-reports/trivy-iac.json"
+          exit-code: "0"
+          severity: "HIGH,CRITICAL"
+
+      - name: Write IaC scan evidence if missing
+        if: always()
+        run: |
+          if [ ! -f trivy-iac-reports/trivy-iac.json ]; then
+            echo "Trivy IaC scan did not produce output." > trivy-iac-reports/trivy-iac-error.txt
+            echo "Possible causes: action download/execute failed or no config files found." >> trivy-iac-reports/trivy-iac-error.txt
+          fi
+
+      - name: Package Trivy IaC report
+        if: always()
+        run: |
+          tar -czf trivy-iac-report.tgz -C trivy-iac-reports .
+          ls -lah trivy-iac-report.tgz
+
+      - name: Upload Trivy IaC artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-iac-report
+          path: trivy-iac-report.tgz
+          if-no-files-found: ignore
+
+  # ============================
+  # JOB 2.5: IMAGE SCAN (TRIVY)
+  # ============================
+  image_scan_trivy:
+    name: Image Scan (Trivy)
+    needs: trivy_iac
+    runs-on: ubuntu-latest
+
     permissions:
       contents: read
       packages: read
@@ -185,25 +234,20 @@ jobs:
       - name: Prepare report folder
         run: mkdir -p trivy-reports
 
-      # Ajusta esta imagen a una que EXISTA (si no existe, se genera trivy-error.txt y artifact igual)
       - name: Define image reference
         run: |
           echo "IMAGE_REF=ghcr.io/linuxcontainers/alpine:latest" >> $GITHUB_ENV
 
-      # Login a GHCR (si tu imagen es privada)
       - name: Login to GHCR (if private)
         continue-on-error: true
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
             -u ${{ github.actor }} --password-stdin
 
-      # Trivy Action (no depende de APT repo)
-      # - exit-code: "0" => no bloquea el pipeline aunque encuentre vulnerabilidades
-      # - output => genera archivo para evidencia
-      - name: Trivy scan image 
+      - name: Trivy scan image
         id: trivy
         continue-on-error: true
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@0.31.0
         with:
           image-ref: ${{ env.IMAGE_REF }}
           format: "json"
@@ -211,7 +255,6 @@ jobs:
           exit-code: "0"
           ignore-unfixed: true
 
-      # Si por cualquier motivo no se generó el JSON (imagen inexistente/tag malo), deja evidencia clara
       - name: Write "scan failed / image not found" evidence
         if: always()
         run: |
