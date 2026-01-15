@@ -12,40 +12,111 @@ permissions:
 
 jobs:
   # ============================
-  # JOB 0: SECRET SCANNING (NO BLOQUEANTE)
+  # JOB 0: SECRET SCANNING (NO BLOQUEANTE, 1 SOLO ARTEFACTO)
+  # - detect-secrets (baseline)
+  # - gitleaks (filesystem scan)
+  # - trufflehog (filesystem scan)
+  # - empaqueta todo en secrets-report.tgz
   # ============================
   secrets_scan:
-    name: Secrets Detection (pre-build) - non-blocking
+    name: Secrets Detection (detect-secrets + gitleaks + trufflehog) - non-blocking
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout (full history for better secret hunting)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
+      # 1) detect-secrets
       - name: Install detect-secrets
         run: pip install detect-secrets
 
-      # SOLUCIÓN DEFINITIVA (sin here-doc, sin errores):
-      # - Excluye .git para evitar falsos positivos (FETCH_HEAD)
-      # - NO interactivo
-      # - NO bloquea el pipeline
-      # - Genera baseline + resumen como evidencia
-      - name: Scan for secrets (non-blocking)
+      - name: detect-secrets scan (non-blocking)
         continue-on-error: true
         run: |
-          detect-secrets scan --all-files --exclude-files '\.git/.*' > .secrets.baseline
-          echo "=== Potential secrets summary ===" > secrets-scan.log
-          grep -R '"type":' .secrets.baseline >> secrets-scan.log || true
+          mkdir -p secret-reports
+          # Excluye .git para evitar falsos positivos como FETCH_HEAD
+          detect-secrets scan --all-files --exclude-files '\.git/.*' > secret-reports/detect-secrets.baseline
 
-      # Evidencia siempre disponible
-      - name: Upload secrets scan artifacts
+      # 2) Gitleaks (filesystem)
+      - name: Run Gitleaks (non-blocking)
+        continue-on-error: true
+        run: |
+          # Ejecuta gitleaks en contenedor y genera reporte JSON
+          docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:latest \
+            detect --source /repo --report-format json --report-path secret-reports/gitleaks.json --redact --no-git
+
+      # 3) TruffleHog (filesystem)
+      - name: Run TruffleHog (non-blocking)
+        continue-on-error: true
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo trufflesecurity/trufflehog:latest \
+            filesystem /repo --json > secret-reports/trufflehog.json
+
+      # 4) Consolidar resultados (summary.json) - sin python -c multilínea
+      - name: Build consolidated summary
+        continue-on-error: true
+        run: |
+          cat > secret-reports/summary.py << 'EOF'
+          import json
+          from pathlib import Path
+
+          p = Path("secret-reports")
+
+          def safe_load_json(path: Path, default):
+            try:
+              return json.loads(path.read_text())
+            except Exception:
+              return default
+
+          # detect-secrets: cuenta findings desde results{}
+          ds = safe_load_json(p / "detect-secrets.baseline", {})
+          results = ds.get("results", {})
+          ds_count = sum(len(v) for v in results.values()) if isinstance(results, dict) else -1
+
+          # gitleaks: array json
+          gl = safe_load_json(p / "gitleaks.json", [])
+          gl_count = len(gl) if isinstance(gl, list) else -1
+
+          # trufflehog: jsonl (1 hallazgo por línea)
+          try:
+            th_text = (p / "trufflehog.json").read_text()
+            th_count = len([ln for ln in th_text.splitlines() if ln.strip()])
+          except Exception:
+            th_count = -1
+
+          summary = {
+            "detect_secrets_findings": ds_count,
+            "gitleaks_findings": gl_count,
+            "trufflehog_findings": th_count,
+            "mode": "non-blocking",
+            "files": {
+              "detect_secrets_baseline": "secret-reports/detect-secrets.baseline",
+              "gitleaks_report": "secret-reports/gitleaks.json",
+              "trufflehog_report": "secret-reports/trufflehog.json"
+            }
+          }
+
+          (p / "summary.json").write_text(json.dumps(summary, indent=2))
+          print(json.dumps(summary, indent=2))
+          EOF
+
+          python secret-reports/summary.py
+
+      # 5) Empaquetar todo en 1 solo archivo (un solo artefacto)
+      - name: Package reports into single artifact file
+        if: always()
+        run: |
+          tar -czf secrets-report.tgz -C secret-reports .
+          ls -lah secrets-report.tgz
+
+      - name: Upload single secrets artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: secrets-scan-report
-          path: |
-            .secrets.baseline
-            secrets-scan.log
+          name: secrets-report
+          path: secrets-report.tgz
           if-no-files-found: ignore
 
   # ============================
@@ -81,7 +152,6 @@ jobs:
             -Dsonar.token=$SONAR_TOKEN
 
   # ============================
-  # ============================
   # JOB 2: SCA (DEPENDENCIAS)
   # ============================
   sca_snyk:
@@ -93,11 +163,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Instala Snyk CLI (necesario para usar "snyk test" en el runner)
       - name: Install Snyk CLI
         run: npm i -g snyk
 
-      # Ejecuta Snyk SCA y genera reporte JSON (modo visibilidad)
       - name: Run Snyk SCA (generate report)
         continue-on-error: true
         env:
@@ -106,7 +174,6 @@ jobs:
           snyk auth $SNYK_TOKEN
           snyk test --all-projects --json > snyk-report.json
 
-      # Sube el reporte Snyk como Artifact (evidencia)
       - name: Upload Snyk report
         if: always()
         uses: actions/upload-artifact@v4
@@ -115,9 +182,9 @@ jobs:
           path: snyk-report.json
           if-no-files-found: ignore
 
-# ============================
-# JOB 3: DAST (APLICACIÓN)
-# ============================
+  # ============================
+  # JOB 3: DAST (APLICACIÓN)
+  # ============================
   dast_zap:
     name: DAST (OWASP ZAP Baseline)
     needs: sca_snyk
@@ -127,7 +194,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Ejecuta OWASP ZAP Baseline (spider + passive scan, sin ataque activo)
       - name: ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.15.0
         continue-on-error: true
@@ -135,7 +201,6 @@ jobs:
           target: "http://testphp.vulnweb.com/"
           cmd_options: "-a"
 
-      # Sube los reportes como artifacts para evidencia (HTML/MD/JSON)
       - name: Upload ZAP reports
         if: always()
         uses: actions/upload-artifact@v4
