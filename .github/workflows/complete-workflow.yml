@@ -30,3 +30,73 @@ jobs:
         with:
           java-version: "21"
           distribution: "zulu"
+          cache: maven
+
+      # Compila y ejecuta pruebas unitarias (fase verify)
+      - name: Build + Test
+        run: mvn -B verify
+
+      # Ejecuta análisis SAST con SonarCloud (no repite verify)
+      - name: SonarCloud analysis (SAST)
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          # Plugin oficial de Sonar para Maven (fully-qualified para evitar error "No plugin found for prefix sonar")
+          # Publica el análisis en SonarCloud usando projectKey/organization y token
+          mvn -B org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
+            -Dsonar.projectKey=dherrrera-source_javaprojectkey \
+            -Dsonar.organization=dherrrera-source \
+            -Dsonar.host.url=https://sonarcloud.io \
+            -Dsonar.token=$SONAR_TOKEN
+
+  # ============================
+  # JOB 2: SCA (DEPENDENCIAS)
+  # ============================
+  sca_snyk:
+    name: SCA (Snyk) - Dependency vulnerabilities
+    needs: build_sast
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Ejecuta análisis SCA con Snyk (dependencias directas y transitivas)
+      # Modo visibilidad: no rompe el pipeline si encuentra vulnerabilidades
+      - name: Run Snyk SCA (report mode)
+        uses: snyk/actions/maven@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+
+  # ============================
+  # JOB 3: DAST (APLICACIÓN)
+  # ============================
+  dast_zap:
+    name: DAST (OWASP ZAP Baseline)
+    needs: sca_snyk
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Ejecuta OWASP ZAP Baseline (spider + passive scan, sin ataque activo)
+      - name: ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.15.0
+        with:
+          target: "http://testphp.vulnweb.com/"
+          cmd_options: "-a"
+
+      # Sube los reportes como artifacts para evidencia (HTML/MD/JSON)
+      - name: Upload ZAP reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-reports
+          path: |
+            report_html.html
+            report_md.md
+            report_json.json
+          if-no-files-found: ignore
