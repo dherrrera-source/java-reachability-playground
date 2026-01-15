@@ -16,5 +16,4 @@ jobs:
         uses: zaproxy/action-baseline@v0.15.0
         with:
           target: 'https://www.mibanco.com.pe/'
-          rules_file_name: '.zap/rules.tsv'
           cmd_options: '-a'
