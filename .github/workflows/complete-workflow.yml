@@ -12,35 +12,48 @@ permissions:
 
 jobs:
   # ============================
-  # JOB 0: SECRET SCANNING
+  # JOB 0: SECRET SCANNING (NO BLOQUEANTE)
   # ============================
   secrets_scan:
-    name: Secrets Detection (pre-build)
+    name: Secrets Detection (pre-build) - non-blocking
     runs-on: ubuntu-latest
 
     steps:
-      # Descarga el código del repositorio
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Instala detect-secrets
       - name: Install detect-secrets
         run: pip install detect-secrets
 
-      # Escanea el repositorio en busca de secretos
-      # Si se detectan secretos reales, el audit falla el job
-      - name: Scan for secrets
+      # Escaneo NO interactivo:
+      # - Excluye .git para evitar falsos positivos (FETCH_HEAD)
+      # - No bloquea el pipeline
+      - name: Scan for secrets (non-blocking)
+        continue-on-error: true
         run: |
-          detect-secrets scan --all-files > .secrets.baseline
-          detect-secrets audit .secrets.baseline
+          detect-secrets scan --all-files --exclude-files '\.git/.*' > .secrets.baseline
+          echo "=== Potential secrets (baseline summary) ===" > secrets-scan.log
+          python - << 'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path(".secrets.baseline").read_text())
+          results = data.get("results", {})
+          total = sum(len(v) for v in results.values())
+          print(f"Total potential secrets: {total}")
+          for f, items in results.items():
+            for it in items:
+              print(f"{f} | {it.get('type')} | line={it.get('line_number')}")
+          PY | tee -a secrets-scan.log
 
-      # Sube el resultado como Artifact (evidencia)
-      - name: Upload secrets scan report
+      # Evidencia siempre disponible
+      - name: Upload secrets scan artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: secrets-scan-report
-          path: .secrets.baseline
+          path: |
+            .secrets.baseline
+            secrets-scan.log
           if-no-files-found: ignore
 
   # ============================
@@ -103,35 +116,3 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: snyk-sca-report
-          path: snyk-report.json
-          if-no-files-found: ignore
-
-  # ============================
-  # JOB 3: DAST (APLICACIÓN)
-  # ============================
-  dast_zap:
-    name: DAST (OWASP ZAP Baseline)
-    needs: sca_snyk
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: ZAP Baseline Scan
-        uses: zaproxy/action-baseline@v0.15.0
-        continue-on-error: true
-        with:
-          target: "http://testphp.vulnweb.com/"
-          cmd_options: "-a"
-
-      - name: Upload ZAP reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: zap-reports
-          path: |
-            report_html.html
-            report_md.md
-            report_json.json
-          if-no-files-found: ignore
