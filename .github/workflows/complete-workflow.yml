@@ -188,7 +188,7 @@ jobs:
       # Ajusta esta imagen a una que EXISTA (si no existe, se genera trivy-error.txt y artifact igual)
       - name: Define image reference
         run: |
-          echo "IMAGE_REF=ghcr.io/dherrrera-source/java-reachability-playground:latest" >> $GITHUB_ENV
+          echo "IMAGE_REF=ghcr.io/linuxcontainers/alpine:latest" >> $GITHUB_ENV
 
       # Login a GHCR (si tu imagen es privada)
       - name: Login to GHCR (if private)
