@@ -61,14 +61,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Ejecuta análisis SCA con Snyk (dependencias directas y transitivas)
-      # Modo visibilidad: no rompe el pipeline si encuentra vulnerabilidades
-      - name: Run Snyk SCA (report mode)
-        uses: snyk/actions/maven@master
+      # Instala Snyk CLI (necesario para usar "snyk test" en el runner)
+      - name: Install Snyk CLI
+        run: npm i -g snyk
+
+      # Ejecuta Snyk SCA y genera reporte JSON (modo visibilidad)
+      - name: Run Snyk SCA (generate report)
         continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          snyk auth $SNYK_TOKEN
+          snyk test --all-projects --json > snyk-report.json
 
+      # Sube el reporte Snyk como Artifact (evidencia)
+      - name: Upload Snyk report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-sca-report
+          path: snyk-report.json
+          if-no-files-found: ignore
 
   # ============================
   # JOB 3: DAST (APLICACIÓN)
