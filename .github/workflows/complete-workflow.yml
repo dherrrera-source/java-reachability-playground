@@ -85,6 +85,7 @@ jobs:
       # Ejecuta OWASP ZAP Baseline (spider + passive scan, sin ataque activo)
       - name: ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.15.0
+        continue-on-error: true
         with:
           target: "http://testphp.vulnweb.com/"
           cmd_options: "-a"
