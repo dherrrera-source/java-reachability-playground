@@ -1,44 +1,133 @@
-name: Build code, run unit test, run SAST, SCA, DAST security scans
-on: push
+# Nombre del workflow que aparecerá en GitHub Actions
+name: Build, Test & Security Scans (SAST/SCA/DAST)
+
+# Evento que dispara el workflow:
+# Se ejecuta en cada push a cualquier rama
+on:
+  push:
+    branches: ["**"]
+
+# Permisos mínimos del token de GitHub Actions
+# Solo lectura del contenido del repositorio (principio de mínimo privilegio)
+permissions:
+  contents: read
 
 jobs:
-  build:
+
+  # ============================
+  # JOB 1: BUILD + SAST
+  # ============================
+  build_sast:
+    # Nombre descriptivo del job
+    name: Build + Unit Tests + SAST (SonarCloud)
+
+    # Runner efímero Linux administrado por GitHub
     runs-on: ubuntu-latest
-    name: Run unit tests and SAST scan on the source code 
+
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up JDK 21
-      uses: actions/setup-java@v4
-      with:
-        java-version: '21'
-        distribution: 'zulu'
-        cache: maven
-    - name: Build with Maven cloud
-      run:  mvn -B verify sonar:sonar -Dsonar.projectKey=javaprojectkey -Dsonar.organization=javaorgkey -Dsonar.host.url=https://sonarcloud.io -Dsonar.login=$SONAR_TOKEN
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-  security:
-    runs-on: ubuntu-latest
-    name: Run the SCA scan on the source code
-    steps:
-      - uses: actions/checkout@master
-      - name: RunSnyk to check for vulnerabilities
-        uses: snyk/actions/maven@master
-        continue-on-error: true
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-  zap_scan:
-    runs-on: ubuntu-latest
-    name: Run DAST scan on the web application
-    steps:
+      # Descarga el código del repositorio en el runner
+      # No ejecuta código, solo clona el repo
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
+
+      # Instala Java JDK 21 usando la distribución Zulu
+      # Habilita cache de Maven para acelerar builds futuros
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
         with:
-          ref: master
-      - name: ZAP Scan
-        uses: zaproxy/action-baseline@v0.14.0
+          java-version: "21"          # Versión de Java
+          distribution: "zulu"        # Distribución certificada
+          cache: maven                # Cachea ~/.m2 para eficiencia
+
+      # Ejecuta el ciclo de vida de Maven hasta "verify":
+      # - Compila el código
+      # - Ejecuta pruebas unitarias
+      # - Valida el proyecto
+      - name: Build + Test
+        run: mvn -B verify            # -B = modo batch (no interactivo, CI friendly)
+
+      # Ejecuta análisis SAST con SonarCloud
+      # Analiza el código fuente en busca de:
+      # - Bugs
+      # - Vulnerabilidades
+      # - Code Smells
+      # - Technical Debt
+      - name: SonarCloud analysis (SAST)
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}  # Token seguro almacenado en GitHub Secrets
+        run: |
+          mvn -B verify \
+            org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \   # Plugin oficial Sonar
+            -Dsonar.projectKey=dherrrera-source_javaprojectkey \        # Identificador único del proyecto
+            -Dsonar.organization=dherrrera-source \                     # Organización en SonarCloud
+            -Dsonar.host.url=https://sonarcloud.io \                    # Endpoint SonarCloud
+            -Dsonar.token=${{ secrets.SONAR_TOKEN }}                    # Autenticación segura
+
+  # ============================
+  # JOB 2: SCA (DEPENDENCIAS)
+  # ============================
+  sca_snyk:
+    # Nombre del job
+    name: SCA (Snyk) - Dependency vulnerabilities
+
+    # Se ejecuta solo si build_sast terminó correctamente
+    needs: build_sast
+
+    runs-on: ubuntu-latest
+
+    steps:
+      # Descarga nuevamente el código para este job
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Ejecuta análisis SCA con Snyk:
+      # - Detecta vulnerabilidades en dependencias directas y transitivas
+      # - Consulta base de datos de CVEs de Snyk
+      # - NO bloquea el pipeline (modo visibilidad)
+      - name: Run Snyk SCA (report mode)
+        uses: snyk/actions/maven@master
+        continue-on-error: true       # Permite continuar aunque haya vulnerabilidades
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}  # Token Snyk seguro
+
+  # ============================
+  # JOB 3: DAST (APLICACIÓN)
+  # ============================
+  dast_zap:
+    # Nombre del job
+    name: DAST (OWASP ZAP Baseline)
+
+    # Se ejecuta solo si el SCA terminó
+    needs: sca_snyk
+
+    runs-on: ubuntu-latest
+
+    steps:
+      # Descarga el código (necesario para contexto del pipeline)
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Ejecuta OWASP ZAP en modo Baseline:
+      # - Spider + escaneo pasivo
+      # - NO realiza ataques activos
+      # - Ideal para CI/CD
+      - name: ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.15.0
         with:
-          target: 'http://testphp.vulnweb.com/'
-          rules_file_name: '.zap/rules.tsv'
-          cmd_options: '-a'
+          target: "http://testphp.vulnweb.com/"  # Aplicación objetivo (demo)
+          cmd_options: "-a"                      # Incluye reglas alpha (mayor cobertura)
+
+      # Sube los reportes de ZAP como artifacts del workflow:
+      # - HTML: informe visual
+      # - MD: texto estructurado
+      # - JSON: integraciones y métricas
+      - name: Upload ZAP reports
+        if: always()                             # Se ejecuta incluso si el scan marca warnings
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-reports                     # Nombre del artifact (ZIP)
+          path: |
+            report_html.html
+            report_md.md
+            report_json.json
+          if-no-files-found: ignore              # Evita fallo si no hay archivos
