@@ -1,30 +1,60 @@
 # Nombre del workflow que aparecerá en GitHub Actions
 name: Build, Test & Security Scans (SAST/SCA/DAST)
 
-# Evento que dispara el workflow: se ejecuta en cada push a cualquier rama
+# Evento que dispara el workflow
 on:
   push:
     branches: ["**"]
 
-# Permisos mínimos del token de GitHub Actions (principio de mínimo privilegio)
+# Permisos mínimos del token de GitHub Actions
 permissions:
   contents: read
 
 jobs:
   # ============================
+  # JOB 0: SECRET SCANNING
+  # ============================
+  secrets_scan:
+    name: Secrets Detection (pre-build)
+    runs-on: ubuntu-latest
+
+    steps:
+      # Descarga el código del repositorio
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Instala detect-secrets
+      - name: Install detect-secrets
+        run: pip install detect-secrets
+
+      # Escanea el repositorio en busca de secretos
+      # Si se detectan secretos reales, el audit falla el job
+      - name: Scan for secrets
+        run: |
+          detect-secrets scan --all-files > .secrets.baseline
+          detect-secrets audit .secrets.baseline
+
+      # Sube el resultado como Artifact (evidencia)
+      - name: Upload secrets scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: secrets-scan-report
+          path: .secrets.baseline
+          if-no-files-found: ignore
+
+  # ============================
   # JOB 1: BUILD + SAST
   # ============================
   build_sast:
     name: Build + Unit Tests + SAST (SonarCloud)
+    needs: secrets_scan
     runs-on: ubuntu-latest
 
     steps:
-      # Descarga el código del repositorio en el runner
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Instala Java JDK 21 usando la distribución Zulu
-      # Habilita cache de Maven para acelerar builds futuros
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
@@ -32,17 +62,13 @@ jobs:
           distribution: "zulu"
           cache: maven
 
-      # Compila y ejecuta pruebas unitarias (fase verify)
       - name: Build + Test
         run: mvn -B verify
 
-      # Ejecuta análisis SAST con SonarCloud (no repite verify)
       - name: SonarCloud analysis (SAST)
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
-          # Plugin oficial de Sonar para Maven (fully-qualified para evitar error "No plugin found for prefix sonar")
-          # Publica el análisis en SonarCloud usando projectKey/organization y token
           mvn -B org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
             -Dsonar.projectKey=dherrrera-source_javaprojectkey \
             -Dsonar.organization=dherrrera-source \
@@ -61,11 +87,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Instala Snyk CLI (necesario para usar "snyk test" en el runner)
       - name: Install Snyk CLI
         run: npm i -g snyk
 
-      # Ejecuta Snyk SCA y genera reporte JSON (modo visibilidad)
       - name: Run Snyk SCA (generate report)
         continue-on-error: true
         env:
@@ -74,7 +98,6 @@ jobs:
           snyk auth $SNYK_TOKEN
           snyk test --all-projects --json > snyk-report.json
 
-      # Sube el reporte Snyk como Artifact (evidencia)
       - name: Upload Snyk report
         if: always()
         uses: actions/upload-artifact@v4
@@ -95,7 +118,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Ejecuta OWASP ZAP Baseline (spider + passive scan, sin ataque activo)
       - name: ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.15.0
         continue-on-error: true
@@ -103,7 +125,6 @@ jobs:
           target: "http://testphp.vulnweb.com/"
           cmd_options: "-a"
 
-      # Sube los reportes como artifacts para evidencia (HTML/MD/JSON)
       - name: Upload ZAP reports
         if: always()
         uses: actions/upload-artifact@v4
