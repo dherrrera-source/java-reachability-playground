@@ -89,6 +89,7 @@ jobs:
             -Dsonar.token=$SONAR_TOKEN
 
   # ============================
+  # ============================
   # JOB 2: SCA (DEPENDENCIAS)
   # ============================
   sca_snyk:
@@ -100,9 +101,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Instala Snyk CLI (necesario para usar "snyk test" en el runner)
       - name: Install Snyk CLI
         run: npm i -g snyk
 
+      # Ejecuta Snyk SCA y genera reporte JSON (modo visibilidad)
       - name: Run Snyk SCA (generate report)
         continue-on-error: true
         env:
@@ -111,8 +114,43 @@ jobs:
           snyk auth $SNYK_TOKEN
           snyk test --all-projects --json > snyk-report.json
 
+      # Sube el reporte Snyk como Artifact (evidencia)
       - name: Upload Snyk report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: snyk-sca-report
+          path: snyk-report.json
+          if-no-files-found: ignore
+
+# ============================
+# JOB 3: DAST (APLICACIÓN)
+# ============================
+  dast_zap:
+    name: DAST (OWASP ZAP Baseline)
+    needs: sca_snyk
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Ejecuta OWASP ZAP Baseline (spider + passive scan, sin ataque activo)
+      - name: ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.15.0
+        continue-on-error: true
+        with:
+          target: "http://testphp.vulnweb.com/"
+          cmd_options: "-a"
+
+      # Sube los reportes como artifacts para evidencia (HTML/MD/JSON)
+      - name: Upload ZAP reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-reports
+          path: |
+            report_html.html
+            report_md.md
+            report_json.json
+          if-no-files-found: ignore
