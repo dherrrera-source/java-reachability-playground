@@ -183,7 +183,7 @@ jobs:
           if-no-files-found: ignore
 
   # ============================
-  # JOB 2.5: IMAGE SCAN (TRIVY)
+  # JOB 2.5: IMAGE SCAN (TRIVY) - ROBUSTO (NO FALLA SI LA IMAGEN NO EXISTE)
   # ============================
   image_scan_trivy:
     name: Image Scan (Trivy) - Container vulnerabilities
@@ -191,21 +191,29 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Define la imagen a escanear (ajusta a tu imagen real)
+      # Ajusta a tu imagen real (si no existe el tag, se generará trivy-error.txt y artifact igual)
       - name: Define image reference
         run: |
           echo "IMAGE_REF=ghcr.io/dherrrera-source/java-reachability-playground:latest" >> $GITHUB_ENV
 
-      # Login al registry si es privado (ejemplo GHCR)
-      # Si la imagen es pública, puedes eliminar este paso.
+      # Prepara folder SIEMPRE para evitar fallo al empaquetar
+      - name: Prepare report folder
+        run: |
+          mkdir -p trivy-reports
+
+      # Login al registry si es privado (GHCR ejemplo)
       - name: Login to GHCR (if private)
         continue-on-error: true
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
             -u ${{ github.actor }} --password-stdin
 
-      - name: Pull image
-        run: docker pull "$IMAGE_REF"
+      # Pull no bloqueante: si falla por "manifest unknown", no rompe el job
+      - name: Pull image (non-blocking)
+        id: pull
+        continue-on-error: true
+        run: |
+          docker pull "$IMAGE_REF"
 
       # Instala Trivy desde repo oficial (Ubuntu)
       - name: Install Trivy
@@ -217,15 +225,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y trivy
 
-      # Scan no bloqueante (modo visibilidad)
-      - name: Trivy scan image (non-blocking)
+      # Si la imagen existe, escanea
+      - name: Trivy scan image (when image exists)
+        if: steps.pull.outcome == 'success'
         continue-on-error: true
         run: |
-          mkdir -p trivy-reports
           trivy image --format json --output trivy-reports/trivy-image.json "$IMAGE_REF"
           trivy image --format table --output trivy-reports/trivy-image.txt "$IMAGE_REF"
 
-      # Artifact con evidencia
+      # Si la imagen NO existe, deja evidencia clara (artifact igual)
+      - name: Write "image not found" report
+        if: steps.pull.outcome != 'success'
+        run: |
+          echo "Trivy scan skipped: image not found or tag does not exist." > trivy-reports/trivy-error.txt
+          echo "IMAGE_REF=$IMAGE_REF" >> trivy-reports/trivy-error.txt
+          echo "Fix: build/push the image first, or set IMAGE_REF to an existing image:tag." >> trivy-reports/trivy-error.txt
+
+      # Empaqueta evidencia SIEMPRE
       - name: Package Trivy report
         if: always()
         run: |
