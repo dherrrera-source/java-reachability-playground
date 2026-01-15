@@ -17,7 +17,7 @@ jobs:
       - name: Build + SonarCloud analysis
         run: |
           mvn -B verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
-            -Dsonar.projectKey=javaprojectkey \
-            -Dsonar.organization=javaorgkey \
+            -Dsonar.projectKey=dherrrera-source_javaprojectkey \
+            -Dsonar.organization=dherrrera-source \
             -Dsonar.host.url=https://sonarcloud.io \
             -Dsonar.token=${{ secrets.SONAR_TOKEN }}
