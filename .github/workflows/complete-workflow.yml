@@ -13,10 +13,6 @@ permissions:
 jobs:
   # ============================
   # JOB 0: SECRET SCANNING (NO BLOQUEANTE, 1 SOLO ARTEFACTO)
-  # - detect-secrets (JSON)
-  # - gitleaks (filesystem scan)
-  # - trufflehog (filesystem scan)
-  # - empaqueta todo en secrets-report.tgz
   # ============================
   secrets_scan:
     name: Secrets Detection (detect-secrets + gitleaks + trufflehog) - non-blocking
@@ -28,7 +24,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 1) detect-secrets
       - name: Install detect-secrets
         run: pip install detect-secrets
 
@@ -36,25 +31,20 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p secret-reports
-          # Excluye .git para evitar falsos positivos como FETCH_HEAD
           detect-secrets scan --all-files --exclude-files '\.git/.*' > secret-reports/detect-secrets.json
 
-      # 2) Gitleaks (filesystem)
       - name: Run Gitleaks (non-blocking)
         continue-on-error: true
         run: |
-          # Ejecuta gitleaks en contenedor y genera reporte JSON
           docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:latest \
             detect --source /repo --report-format json --report-path secret-reports/gitleaks.json --redact --no-git
 
-      # 3) TruffleHog (filesystem)
       - name: Run TruffleHog (non-blocking)
         continue-on-error: true
         run: |
           docker run --rm -v "$PWD:/repo" -w /repo trufflesecurity/trufflehog:latest \
             filesystem /repo --json > secret-reports/trufflehog.json
 
-      # 4) Consolidar resultados (summary.json)
       - name: Build consolidated summary
         continue-on-error: true
         run: |
@@ -70,16 +60,13 @@ jobs:
             except Exception:
               return default
 
-          # detect-secrets: cuenta findings desde results{}
           ds = safe_load_json(p / "detect-secrets.json", {})
           results = ds.get("results", {})
           ds_count = sum(len(v) for v in results.values()) if isinstance(results, dict) else -1
 
-          # gitleaks: array json
           gl = safe_load_json(p / "gitleaks.json", [])
           gl_count = len(gl) if isinstance(gl, list) else -1
 
-          # trufflehog: jsonl (1 hallazgo por línea)
           try:
             th_text = (p / "trufflehog.json").read_text()
             th_count = len([ln for ln in th_text.splitlines() if ln.strip()])
@@ -104,7 +91,6 @@ jobs:
 
           python secret-reports/summary.py
 
-      # 5) Empaquetar todo en 1 solo archivo (un solo artefacto)
       - name: Package reports into single artifact file
         if: always()
         run: |
@@ -183,65 +169,60 @@ jobs:
           if-no-files-found: ignore
 
   # ============================
-  # JOB 2.5: IMAGE SCAN (TRIVY) - ROBUSTO (NO FALLA SI LA IMAGEN NO EXISTE)
+  # JOB 2.5: IMAGE SCAN (TRIVY) - SIN APT REPO (USANDO ACTION OFICIAL)
   # ============================
   image_scan_trivy:
     name: Image Scan (Trivy) - Container vulnerabilities
     needs: sca_snyk
     runs-on: ubuntu-latest
 
+    # Para leer imágenes privadas en GHCR necesitas packages:read
+    permissions:
+      contents: read
+      packages: read
+
     steps:
-      # Ajusta a tu imagen real (si no existe el tag, se generará trivy-error.txt y artifact igual)
+      - name: Prepare report folder
+        run: mkdir -p trivy-reports
+
+      # Ajusta esta imagen a una que EXISTA (si no existe, se genera trivy-error.txt y artifact igual)
       - name: Define image reference
         run: |
           echo "IMAGE_REF=ghcr.io/dherrrera-source/java-reachability-playground:latest" >> $GITHUB_ENV
 
-      # Prepara folder SIEMPRE para evitar fallo al empaquetar
-      - name: Prepare report folder
-        run: |
-          mkdir -p trivy-reports
-
-      # Login al registry si es privado (GHCR ejemplo)
+      # Login a GHCR (si tu imagen es privada)
       - name: Login to GHCR (if private)
         continue-on-error: true
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
             -u ${{ github.actor }} --password-stdin
 
-      # Pull no bloqueante: si falla por "manifest unknown", no rompe el job
-      - name: Pull image (non-blocking)
-        id: pull
+      # Trivy Action (no depende de APT repo)
+      # - exit-code: "0" => no bloquea el pipeline aunque encuentre vulnerabilidades
+      # - output => genera archivo para evidencia
+      - name: Trivy scan image (non-blocking)
+        id: trivy
         continue-on-error: true
-        run: |
-          docker pull "$IMAGE_REF"
+        uses: aquasecurity/trivy-action@v0.33.1
+        with:
+          image-ref: ${{ env.IMAGE_REF }}
+          format: "json"
+          output: "trivy-reports/trivy-image.json"
+          exit-code: "0"
+          ignore-unfixed: true
 
-      # Instala Trivy desde repo oficial (Ubuntu)
-      - name: Install Trivy
+      # Si por cualquier motivo no se generó el JSON (imagen inexistente/tag malo), deja evidencia clara
+      - name: Write "scan failed / image not found" evidence
+        if: always()
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wget
-          wget -qO- https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-          echo "deb https://aquasecurity.github.io/trivy-repo/deb stable main" | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update
-          sudo apt-get install -y trivy
+          if [ ! -f trivy-reports/trivy-image.json ]; then
+            echo "Trivy scan did not produce output. Possible causes:" > trivy-reports/trivy-error.txt
+            echo "- IMAGE_REF does not exist (manifest unknown)" >> trivy-reports/trivy-error.txt
+            echo "- Tag is wrong (e.g., latest not published)" >> trivy-reports/trivy-error.txt
+            echo "- Registry auth/permissions (packages:read) missing" >> trivy-reports/trivy-error.txt
+            echo "IMAGE_REF=${IMAGE_REF}" >> trivy-reports/trivy-error.txt
+          fi
 
-      # Si la imagen existe, escanea
-      - name: Trivy scan image (when image exists)
-        if: steps.pull.outcome == 'success'
-        continue-on-error: true
-        run: |
-          trivy image --format json --output trivy-reports/trivy-image.json "$IMAGE_REF"
-          trivy image --format table --output trivy-reports/trivy-image.txt "$IMAGE_REF"
-
-      # Si la imagen NO existe, deja evidencia clara (artifact igual)
-      - name: Write "image not found" report
-        if: steps.pull.outcome != 'success'
-        run: |
-          echo "Trivy scan skipped: image not found or tag does not exist." > trivy-reports/trivy-error.txt
-          echo "IMAGE_REF=$IMAGE_REF" >> trivy-reports/trivy-error.txt
-          echo "Fix: build/push the image first, or set IMAGE_REF to an existing image:tag." >> trivy-reports/trivy-error.txt
-
-      # Empaqueta evidencia SIEMPRE
       - name: Package Trivy report
         if: always()
         run: |
