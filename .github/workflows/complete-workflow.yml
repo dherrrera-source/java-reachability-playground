@@ -1,5 +1,5 @@
 # Nombre del workflow que aparecerá en GitHub Actions
-name: Build, Test & Security Scans (SAST/SCA/IMAGESCAN/DAST)
+name: Security Scans (SAST/SCA/IMAGESCAN/DAST)
 
 # Evento que dispara el workflow
 on:
@@ -109,7 +109,7 @@ jobs:
   # JOB 1: BUILD + SAST
   # ============================
   build_sast:
-    name: Build + Unit Tests + SAST (SonarCloud)
+    name: SAST (SonarCloud)
     needs: secrets_scan
     runs-on: ubuntu-latest
 
@@ -172,7 +172,7 @@ jobs:
   # JOB 2.5: IMAGE SCAN (TRIVY) - SIN APT REPO (USANDO ACTION OFICIAL)
   # ============================
   image_scan_trivy:
-    name: Image Scan (Trivy) - Container vulnerabilities
+    name: Image Scan (Trivy) 
     needs: sca_snyk
     runs-on: ubuntu-latest
 
@@ -200,7 +200,7 @@ jobs:
       # Trivy Action (no depende de APT repo)
       # - exit-code: "0" => no bloquea el pipeline aunque encuentre vulnerabilidades
       # - output => genera archivo para evidencia
-      - name: Trivy scan image (non-blocking)
+      - name: Trivy scan image 
         id: trivy
         continue-on-error: true
         uses: aquasecurity/trivy-action@0.33.1
@@ -241,7 +241,7 @@ jobs:
   # JOB 3: DAST (APLICACIÓN)
   # ============================
   dast_zap:
-    name: DAST (OWASP ZAP Baseline)
+    name: DAST (OWASP ZAP)
     needs: image_scan_trivy
     runs-on: ubuntu-latest
 
