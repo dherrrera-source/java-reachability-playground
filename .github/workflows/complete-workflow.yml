@@ -25,25 +25,17 @@ jobs:
       - name: Install detect-secrets
         run: pip install detect-secrets
 
-      # Escaneo NO interactivo:
+      # SOLUCIÓN DEFINITIVA (sin here-doc, sin errores):
       # - Excluye .git para evitar falsos positivos (FETCH_HEAD)
-      # - No bloquea el pipeline
+      # - NO interactivo
+      # - NO bloquea el pipeline
+      # - Genera baseline + resumen como evidencia
       - name: Scan for secrets (non-blocking)
         continue-on-error: true
         run: |
           detect-secrets scan --all-files --exclude-files '\.git/.*' > .secrets.baseline
-          echo "=== Potential secrets (baseline summary) ===" > secrets-scan.log
-          python - << 'PY'
-          import json
-          from pathlib import Path
-          data = json.loads(Path(".secrets.baseline").read_text())
-          results = data.get("results", {})
-          total = sum(len(v) for v in results.values())
-          print(f"Total potential secrets: {total}")
-          for f, items in results.items():
-            for it in items:
-              print(f"{f} | {it.get('type')} | line={it.get('line_number')}")
-          PY | tee -a secrets-scan.log
+          echo "=== Potential secrets summary ===" > secrets-scan.log
+          grep -R '"type":' .secrets.baseline >> secrets-scan.log || true
 
       # Evidencia siempre disponible
       - name: Upload secrets scan artifacts
