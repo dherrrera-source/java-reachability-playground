@@ -1,50 +1,82 @@
-# Nombre del workflow que aparecerá en GitHub Actions
+# ============================================================
+# WORKFLOW: Security Scans (SAST/SCA/IAC/IMAGESCAN/DAST)
+# Objetivo:
+#  - Ejecutar controles DevSecOps en cadena (pipeline encadenado)
+#  - Mantener todo "NO bloqueante" para visibilidad (continue-on-error / exit-code 0)
+#  - Guardar evidencia en artifacts en cada etapa
+# ============================================================
+
+# Nombre del workflow en la UI de GitHub Actions
 name: Security Scans (SAST/SCA/IAC/IMAGESCAN/DAST)
 
-# Evento que dispara el workflow
+# Evento que dispara el workflow:
+# - Se ejecuta en cada push a cualquier rama
 on:
   push:
     branches: ["**"]
 
-# Permisos mínimos del token de GitHub Actions
+# Permisos mínimos globales para el GITHUB_TOKEN
+# contents: read => suficiente para clonar/leer repo (principio de mínimo privilegio)
 permissions:
   contents: read
 
 jobs:
-  # ============================
+  # ============================================================
   # JOB 0: SECRET SCANNING (NO BLOQUEANTE, 1 SOLO ARTEFACTO)
-  # ============================
+  # Herramientas:
+  #  - detect-secrets  : baseline JSON (falsos positivos controlables)
+  #  - gitleaks        : escaneo filesystem (docker)
+  #  - trufflehog      : escaneo filesystem (docker)
+  # Evidencia:
+  #  - empaqueta todo en secrets-report.tgz
+  # ============================================================
   secrets_scan:
     name: Secrets Search (detect-secrets + gitleaks + trufflehog)
     runs-on: ubuntu-latest
 
     steps:
+      # Checkout con historial completo:
+      # - Mejora detección de secretos (commits anteriores, etc.)
       - name: Checkout (full history for better secret hunting)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # Instalación de detect-secrets en el runner
       - name: Install detect-secrets
         run: pip install detect-secrets
 
+      # detect-secrets:
+      # - NO interactivo
+      # - excluye .git para evitar falsos positivos (FETCH_HEAD, etc.)
+      # - no bloquea pipeline por continue-on-error
       - name: detect-secrets scan (non-blocking)
         continue-on-error: true
         run: |
           mkdir -p secret-reports
           detect-secrets scan --all-files --exclude-files '\.git/.*' > secret-reports/detect-secrets.json
 
+      # Gitleaks (en contenedor):
+      # - --redact => enmascara secretos en output
+      # - --no-git => no analiza el history, solo filesystem (más rápido, menos ruido)
       - name: Run Gitleaks (non-blocking)
         continue-on-error: true
         run: |
           docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:latest \
             detect --source /repo --report-format json --report-path secret-reports/gitleaks.json --redact --no-git
 
+      # TruffleHog (en contenedor):
+      # - filesystem => escaneo del repo tal como está en el runner
+      # - --json => salida JSON line por line (jsonl)
       - name: Run TruffleHog (non-blocking)
         continue-on-error: true
         run: |
           docker run --rm -v "$PWD:/repo" -w /repo trufflesecurity/trufflehog:latest \
             filesystem /repo --json > secret-reports/trufflehog.json
 
+      # Consolidación:
+      # - Genera summary.json con conteos por herramienta
+      # - Deja trazabilidad de archivos generados
       - name: Build consolidated summary
         continue-on-error: true
         run: |
@@ -60,13 +92,16 @@ jobs:
             except Exception:
               return default
 
+          # detect-secrets => results { file: [findings...] }
           ds = safe_load_json(p / "detect-secrets.json", {})
           results = ds.get("results", {})
           ds_count = sum(len(v) for v in results.values()) if isinstance(results, dict) else -1
 
+          # gitleaks => array JSON
           gl = safe_load_json(p / "gitleaks.json", [])
           gl_count = len(gl) if isinstance(gl, list) else -1
 
+          # trufflehog => jsonl (1 hallazgo por línea)
           try:
             th_text = (p / "trufflehog.json").read_text()
             th_count = len([ln for ln in th_text.splitlines() if ln.strip()])
@@ -91,12 +126,14 @@ jobs:
 
           python secret-reports/summary.py
 
+      # Empaqueta todo lo generado en un solo archivo (artifact único)
       - name: Package reports into single artifact file
         if: always()
         run: |
           tar -czf secrets-report.tgz -C secret-reports .
           ls -lah secrets-report.tgz
 
+      # Sube evidencia a GitHub Actions Artifacts
       - name: Upload single secrets artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -105,18 +142,24 @@ jobs:
           path: secrets-report.tgz
           if-no-files-found: ignore
 
-  # ============================
-  # JOB 1: BUILD + SAST
-  # ============================
+  # ============================================================
+  # JOB 1: BUILD + SAST (SonarCloud)
+  # - Compila + tests
+  # - Ejecuta análisis estático (SAST) y publica en SonarCloud
+  # Encadenamiento:
+  # - needs: secrets_scan => corre después del escaneo de secretos
+  # ============================================================
   build_sast:
     name: SAST (SonarCloud)
     needs: secrets_scan
     runs-on: ubuntu-latest
 
     steps:
+      # Descarga el código (fresh checkout para este job)
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Configura Java 21 + cache de Maven
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
@@ -124,9 +167,13 @@ jobs:
           distribution: "zulu"
           cache: maven
 
+      # Construye y ejecuta tests unitarios
       - name: Build + Test
         run: mvn -B verify
 
+      # SonarCloud:
+      # - usa el plugin oficial fully qualified para evitar:
+      #   "No plugin found for prefix 'sonar'"
       - name: SonarCloud analysis (SAST)
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -137,9 +184,13 @@ jobs:
             -Dsonar.host.url=https://sonarcloud.io \
             -Dsonar.token=$SONAR_TOKEN
 
-  # ============================
-  # JOB 2: SCA (DEPENDENCIAS)
-  # ============================
+  # ============================================================
+  # JOB 2: SCA (Snyk)
+  # - Analiza dependencias directas/transitivas (SCA)
+  # - Genera reporte JSON como evidencia (artifact)
+  # Encadenamiento:
+  # - needs: build_sast => corre después del SAST
+  # ============================================================
   sca_snyk:
     name: SCA (Snyk) - Dependency vulnerabilities
     needs: build_sast
@@ -149,9 +200,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Instala Snyk CLI en el runner
       - name: Install Snyk CLI
         run: npm i -g snyk
 
+      # Ejecuta Snyk en modo no-bloqueante:
+      # - continue-on-error => el job sigue incluso con findings
+      # - guarda reporte JSON para integraciones y auditoría
       - name: Run Snyk SCA (generate report)
         continue-on-error: true
         env:
@@ -160,6 +215,7 @@ jobs:
           snyk auth $SNYK_TOKEN
           snyk test --all-projects --json > snyk-report.json
 
+      # Sube el reporte como artifact
       - name: Upload Snyk report
         if: always()
         uses: actions/upload-artifact@v4
@@ -168,11 +224,14 @@ jobs:
           path: snyk-report.json
           if-no-files-found: ignore
 
-  # ============================
-  # JOB 2.25: IAC SCAN (TRIVY CONFIG) - STAGE SEPARADO
-  # - No bloqueante
-  # - Guarda artifact con JSON (y error si aplica)
-  # ============================
+  # ============================================================
+  # JOB 2.25: IAC SCAN (Trivy Config)
+  # - Escanea IaC / config (Terraform, Kubernetes YAML, Dockerfile, etc.)
+  # - NO bloqueante (exit-code: 0)
+  # - Guarda artifact: trivy-iac-report.tgz
+  # Encadenamiento:
+  # - needs: sca_snyk
+  # ============================================================
   trivy_iac:
     name: IaC Scan (Trivy Config)
     needs: sca_snyk
@@ -182,9 +241,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Carpeta de reportes
       - name: Prepare report folder
         run: mkdir -p trivy-iac-reports
 
+      # Trivy Config Scan:
+      # - scan-type: config => analiza configuraciones/IaC
+      # - scan-ref: "." => todo el repo
+      # - exit-code: "0" => no bloquea
+      # - severity => filtra a HIGH/CRITICAL (solo reduce ruido del reporte)
       - name: Trivy config scan (repo)
         continue-on-error: true
         uses: aquasecurity/trivy-action@0.31.0
@@ -196,6 +261,7 @@ jobs:
           exit-code: "0"
           severity: "HIGH,CRITICAL"
 
+      # Evidencia en caso de que no se genere JSON
       - name: Write IaC scan evidence if missing
         if: always()
         run: |
@@ -204,12 +270,14 @@ jobs:
             echo "Possible causes: action download/execute failed or no config files found." >> trivy-iac-reports/trivy-iac-error.txt
           fi
 
+      # Empaqueta reportes
       - name: Package Trivy IaC report
         if: always()
         run: |
           tar -czf trivy-iac-report.tgz -C trivy-iac-reports .
           ls -lah trivy-iac-report.tgz
 
+      # Sube artifact único
       - name: Upload Trivy IaC artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -218,9 +286,16 @@ jobs:
           path: trivy-iac-report.tgz
           if-no-files-found: ignore
 
-  # ============================
-  # JOB 2.5: IMAGE SCAN (TRIVY)
-  # ============================
+  # ============================================================
+  # JOB 2.5: IMAGE SCAN (Trivy Image)
+  # - Escanea una imagen de contenedor (GHCR/public)
+  # - NO bloqueante (exit-code: 0)
+  # - Guarda artifact: trivy-image-report.tgz
+  # Encadenamiento:
+  # - needs: trivy_iac
+  # Permisos:
+  # - packages: read => requerido si la imagen es privada en GHCR
+  # ============================================================
   image_scan_trivy:
     name: Image Scan (Trivy)
     needs: trivy_iac
@@ -231,19 +306,25 @@ jobs:
       packages: read
 
     steps:
+      # Carpeta de reportes
       - name: Prepare report folder
         run: mkdir -p trivy-reports
 
+      # Define la imagen a escanear (demo pública)
       - name: Define image reference
         run: |
           echo "IMAGE_REF=ghcr.io/linuxcontainers/alpine:latest" >> $GITHUB_ENV
 
+      # Login opcional (si la imagen es privada)
       - name: Login to GHCR (if private)
         continue-on-error: true
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
             -u ${{ github.actor }} --password-stdin
 
+      # Trivy Image Scan:
+      # - output JSON como evidencia
+      # - exit-code 0 => no bloquea pipeline
       - name: Trivy scan image
         id: trivy
         continue-on-error: true
@@ -255,6 +336,7 @@ jobs:
           exit-code: "0"
           ignore-unfixed: true
 
+      # Evidencia si no hay output (imagen no existe, sin permisos, etc.)
       - name: Write "scan failed / image not found" evidence
         if: always()
         run: |
@@ -266,12 +348,14 @@ jobs:
             echo "IMAGE_REF=${IMAGE_REF}" >> trivy-reports/trivy-error.txt
           fi
 
+      # Empaqueta reportes en un artifact único
       - name: Package Trivy report
         if: always()
         run: |
           tar -czf trivy-image-report.tgz -C trivy-reports .
           ls -lah trivy-image-report.tgz
 
+      # Sube artifact único
       - name: Upload Trivy artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -280,9 +364,15 @@ jobs:
           path: trivy-image-report.tgz
           if-no-files-found: ignore
 
-  # ============================
-  # JOB 3: DAST (APLICACIÓN)
-  # ============================
+  # ============================================================
+  # JOB 3: DAST (OWASP ZAP Baseline)
+  # - Spider + Passive scan
+  # - No realiza ataques activos
+  # - NO bloqueante (continue-on-error)
+  # - Genera reportes HTML/MD/JSON como artifacts
+  # Encadenamiento:
+  # - needs: image_scan_trivy
+  # ============================================================
   dast_zap:
     name: DAST (OWASP ZAP)
     needs: image_scan_trivy
@@ -292,6 +382,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ZAP Baseline:
+      # - target demo pública
+      # - cmd_options "-a" => incluye reglas alpha (más cobertura / más ruido potencial)
       - name: ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.15.0
         continue-on-error: true
@@ -299,6 +392,7 @@ jobs:
           target: "http://testphp.vulnweb.com/"
           cmd_options: "-a"
 
+      # Subida de reportes como evidencia
       - name: Upload ZAP reports
         if: always()
         uses: actions/upload-artifact@v4
