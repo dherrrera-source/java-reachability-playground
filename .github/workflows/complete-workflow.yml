@@ -4,6 +4,13 @@
 #  - Ejecutar controles DevSecOps en cadena (pipeline encadenado)
 #  - Mantener todo "NO bloqueante" para visibilidad (continue-on-error / exit-code 0)
 #  - Guardar evidencia en artifacts en cada etapa
+#  - ubuntu-latest:
+#  - Parches de seguridad actualizados
+#  - Kernel actualizado
+#  - TLS moderno
+#  - OpenSSH seguro
+#  - Usuario no privilegiado (runner)
+#  - Sin servicios innecesarios escuchando
 # ============================================================
 
 # Nombre del workflow en la UI de GitHub Actions
