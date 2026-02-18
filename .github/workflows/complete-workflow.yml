@@ -259,7 +259,7 @@ jobs:
       # - severity => filtra a HIGH/CRITICAL (solo reduce ruido del reporte)
       - name: Trivy config scan (repo)
         continue-on-error: true
-        uses: aquasecurity/trivy-action@0.31.0
+        uses: aquasecurity/trivy-action@0.34.0
         with:
           scan-type: "config"
           scan-ref: "."
@@ -335,7 +335,7 @@ jobs:
       - name: Trivy scan image
         id: trivy
         continue-on-error: true
-        uses: aquasecurity/trivy-action@0.31.0
+        uses: aquasecurity/trivy-action@0.34.0
         with:
           image-ref: ${{ env.IMAGE_REF }}
           format: "json"
